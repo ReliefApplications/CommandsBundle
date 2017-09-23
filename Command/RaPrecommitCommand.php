@@ -7,7 +7,6 @@ use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
-
 use Symfony\Component\Console\Question\ConfirmationQuestion;
 
 use Symfony\Component\Process\Process;
@@ -48,9 +47,7 @@ class RaPrecommitCommand extends ContainerAwareCommand
     private $output;
 
     public function __construct(){
-
         parent::__construct( );
-
         $this->configuration = [];
         $this->path = "./";
         $this->messages = [
@@ -59,13 +56,69 @@ class RaPrecommitCommand extends ContainerAwareCommand
         ];
     }
 
+    private function loadConfiguration(OutputInterface $output){
+        //configuration
+        $reflectionClass = new \ReflectionClass($this);
+        $className = $reflectionClass->getShortName();
+        $configurationFile = dirname(__FILE__).'/'.$className.'.json';
+
+        if(file_exists($configurationFile)){
+            $content = file_get_contents($configurationFile);
+            $this->configuration = json_decode($content,true);
+        }else{
+            $output->writeln("<comment>No configuration file found in `$configurationFile`</comment>");
+        }
+        //project path
+        $this->projectPath = dirname($this->getContainer()->get('kernel')->getRootDir());
+
+        //jeton
+        $this->jetonFile = $this->projectPath.'/var/cache/dev/jeton';
+    }
+
+    private function setJeton(){
+
+        if(file_exists($this->jetonFile)){
+            unlink($this->jetonFile);
+        }
+
+        $handle = fopen($this->jetonFile, "w+");
+        fclose($handle);
+    }
+
+    private function resetJeton(){
+
+        if(file_exists($this->jetonFile)){
+            unlink($this->jetonFile);
+        }
+    }
+
+    private function write($content, $style='info'){
+        $this->output->writeln("<$style>$content</$style>");
+    }
+
+    private function setMessage($key, $content, $style='info'){
+        $this->messages[$key] = "<$style>$content</$style>";
+        return $this;
+    }
+
+    private function getMessage($key){
+        return $this->messages[$key];
+    }
+
+    private function logger($message){
+        if( ! empty($message)){
+            $this->setMessage('tmp', $message, self::STYLE_WARNING);
+            $this->output->writeln($this->getMessage('tmp'));
+        }
+        $this->output->writeln($this->getMessage('goback'));
+    }
+
     protected function configure(){
         $this
-            ->setName('ra:precommit')
+            ->setName('reliefapps:precommit')
             ->setDescription('Check your code before to commit')
             ->addArgument('commitMessage', InputArgument::OPTIONAL, 'Commit Message')
-        ;
-
+            ;
     }
 
     protected function execute(InputInterface $input, OutputInterface $output){
@@ -73,7 +126,7 @@ class RaPrecommitCommand extends ContainerAwareCommand
         $this->output = $output;
         $argCommitMessage = $input->getArgument('commitMessage');
 
-        $style = "fg=white;options=bold;bg=cyan";
+        $style = 'fg=white;options=bold;bg=cyan';
         $stylChecking = "fg=cyan";
         $this->setMessage('done', "Done !", "info");
 
@@ -153,254 +206,180 @@ class RaPrecommitCommand extends ContainerAwareCommand
         }
 
         $this->setJeton();
-
-
-
     }
 
-    private function loadConfiguration(OutputInterface $output){
-        //configuration
-        $reflectionClass = new \ReflectionClass($this);
-        $className = $reflectionClass->getShortName();
-        $configurationFile = dirname(__FILE__).'/'.$className.'.json';
+    private function checkDangerousFiles(\Closure $callback){
+        $noFoundMessage = "<".self::STYLE_WARNING.">No dangerous files found.</".self::STYLE_WARNING.">";
 
-        if(file_exists($configurationFile)){
-            $content = file_get_contents($configurationFile);
-            $this->configuration = json_decode($content,true);
-        }else{
-            $output->writeln("<comment>No configuration file found in `$configurationFile`</comment>");
-        }
-        //project path
-        $this->projectPath = dirname($this->getContainer()->get('kernel')->getRootDir());
-
-        //jeton
-        $this->jetonFile = $this->projectPath.'/var/cache/dev/jeton';
-    }
-
-    //
-    //  STYLES
-    //
-
-    private function setJeton(){
-
-        if(file_exists($this->jetonFile)){
-            unlink($this->jetonFile);
+        if(empty($this->configuration['files'])){
+            return $callback(true, $noFoundMessage);
         }
 
-        $handle = fopen($this->jetonFile, "w+");
-        fclose($handle);
-    }
-
-    private function resetJeton(){
-
-        if(file_exists($this->jetonFile)){
-            unlink($this->jetonFile);
+        if(empty($this->configuration['files']['dangerous'])){
+            return $callback(true, $noFoundMessage);
         }
-    }
 
-    private function write($content, $style='info'){
-        $this->output->writeln("<$style>$content</$style>");
-    }
+        //HELPER
+        $helper = $this->getHelper('question');
+        $confirmQuestion = new ConfirmationQuestion('Can you confirm ? (y/n) <comment>[y]</comment>', true, '/^(y|j)/i');
 
-    private function setMessage($key, $content, $style='info'){
-        $this->messages[$key] = "<$style>$content</$style>";
-        return $this;
-    }
+        $files = $this->configuration['files']['dangerous'];
 
-    private function getMessage($key){
-        return $this->messages[$key];
-    }
+        foreach ($files as $key => $value) {
+            $filename = $this->projectPath.'/'.$value;
 
-    private function logger($message){
-        if( ! empty($message)){
-            $this->setMessage('tmp', $message, self::STYLE_WARNING);
-            $this->output->writeln($this->getMessage('tmp'));
+            //Existence
+            if(! file_exists($filename)){
+
+                $this->output->writeln("<".self::STYLE_ERROR.">A dangerous file is missing : `'.$filename.'`</".self::STYLE_ERROR.">");
+                $this->output->writeln("<".self::STYLE_ERROR.">You might delete it.</".self::STYLE_ERROR.">");
+
+                if (!$helper->ask($this->input, $this->output, $confirmQuestion)) {
+                    return $callback(false, "Be careful when modifying dangerous files.");
+                }
+            }
+
+            //Modification
+            else{
+                $process = new Process('git diff '.$filename);
+                $process->start();
+
+                foreach ($process as $type => $data) {
+                    if ($process::OUT === $type) {
+                        if(! empty($data)){
+
+                            $this->output->writeln("<".self::STYLE_WARNING.">A dangerous file has changed : `'.$filename.'`</".self::STYLE_WARNING.">");
+                            $this->output->writeln("<".self::STYLE_WARNING.">You might change it.</".self::STYLE_WARNING.">");
+                            echo $data."\n";
+
+                            if (!$helper->ask($this->input, $this->output, $confirmQuestion)) {
+                                return $callback(false, "Be careful when modifying dangerous files.");
+                            }
+                        }
+
+                    } else {
+                        return $callback(false, $data);
+                    }
+                }
+            }
         }
-        $this->output->writeln($this->getMessage('goback'));
-    }
 
-    //
-    //  GIT
-    //
+        return $callback(true);
+    }
 
     private function getLastCommitId(){
-       $output = array();
-       $rc = 0;
+        $output = array();
+        $rc = 0;
 
-       exec('git log --format="%H" -n 1 | cat', $output, $rc);
-       return is_array($output) ? $output[0] : "";
+        exec('git log --format="%H" -n 1 | cat', $output, $rc);
+        return is_array($output) ? $output[0] : "";
     }
 
     private function extractCommitedFiles(){
-       $output = array();
-       $rc = 0;
+        $output = array();
+        $rc = 0;
 
-       $lastCommitId = $this->getLastCommitId();
+        $lastCommitId = $this->getLastCommitId();
 
-       //check if commits are available
-       $output = array();
-       exec('git rev-parse --verify HEAD 2> /dev/null', $output, $rc);
-       if ($rc == 0) {
-           $lastCommitId = 'HEAD';
-       }
+        //check if commits are available
+        $output = array();
+        exec('git rev-parse --verify HEAD 2> /dev/null', $output, $rc);
+        if ($rc == 0) {
+            $lastCommitId = 'HEAD';
+        }
 
-       //committed files
-       $output = array();
-       exec("git diff-index --cached --name-status $lastCommitId | egrep '^(A|M)' | awk '{print $2;}'", $output);
+        //committed files
+        $output = array();
+        exec("git diff-index --cached --name-status $lastCommitId | egrep '^(A|M)' | awk '{print $2;}'", $output);
 
-       return $output;
-    }
-
-    //
-    //  TASKS
-    //
-
-    private function checkDangerousFiles(\Closure $callback){
-
-       $noFoundMessage = "<".self::STYLE_WARNING.">No dangerous files found.</".self::STYLE_WARNING.">";
-
-       if(empty($this->configuration['files'])){
-           return $callback(true, $noFoundMessage);
-       }
-
-       if(empty($this->configuration['files']['dangerous'])){
-           return $callback(true, $noFoundMessage);
-       }
-
-       //HELPER
-       $helper = $this->getHelper('question');
-       $confirmQuestion = new ConfirmationQuestion('Can you confirm ? (y/n) <comment>[y]</comment>', true, '/^(y|j)/i');
-
-       $files = $this->configuration['files']['dangerous'];
-
-       foreach ($files as $key => $value) {
-           $filename = $this->projectPath.'/'.$value;
-
-           //Existence
-           if(! file_exists($filename)){
-
-               $this->output->writeln("<".self::STYLE_ERROR.">A dangerous file is missing : `'.$filename.'`</".self::STYLE_ERROR.">");
-               $this->output->writeln("<".self::STYLE_ERROR.">You might delete it.</".self::STYLE_ERROR.">");
-
-               if (!$helper->ask($this->input, $this->output, $confirmQuestion)) {
-                   return $callback(false, "Be careful when modifying dangerous files.");
-               }
-           }
-
-           //Modification
-           else{
-               $process = new Process('git diff '.$filename);
-               $process->start();
-
-               foreach ($process as $type => $data) {
-                   if ($process::OUT === $type) {
-                       if(! empty($data)){
-
-                           $this->output->writeln("<".self::STYLE_WARNING.">A dangerous file has changed : `'.$filename.'`</".self::STYLE_WARNING.">");
-                           $this->output->writeln("<".self::STYLE_WARNING.">You might change it.</".self::STYLE_WARNING.">");
-                           echo $data."\n";
-
-                           if (!$helper->ask($this->input, $this->output, $confirmQuestion)) {
-                               return $callback(false, "Be careful when modifying dangerous files.");
-                           }
-                       }
-
-                       return $callback(true);
-
-                   } else {
-                       return $callback(false, $data);
-                   }
-               }
-           }
-       }
-
-       return $callback(true);
+        return $output;
     }
 
     private function checkComposer($files, \Closure $callback){
-       $composerJsonDetected = false;
-       $composerLockDetected = false;
+        $composerJsonDetected = false;
+        $composerLockDetected = false;
 
-       foreach ($files as $file) {
-           if ($file === 'composer.json') {
-               $composerJsonDetected = true;
-           }
+        foreach ($files as $file) {
+            if ($file === 'composer.json') {
+                $composerJsonDetected = true;
+            }
 
-           if ($file === 'composer.lock') {
-               $composerLockDetected = true;
-           }
-       }
+            if ($file === 'composer.lock') {
+                $composerLockDetected = true;
+            }
+        }
 
-       return ($composerJsonDetected && !$composerLockDetected)
-            ? $callback(false, 'composer.lock must be commited if composer.json is modified!')
-            : $callback(true);
+        return ($composerJsonDetected && !$composerLockDetected)
+             ? $callback(false, 'composer.lock must be commited if composer.json is modified!')
+             : $callback(true);
     }
 
     // SYNTAX ERRORS CHECKER
     private function checkPhpLint($files, \Closure $callback){
 
-       $needle = '/(\.php)|(\.inc)$/';
+        $needle = '/(\.php)|(\.inc)$/';
 
-       foreach ($files as $file) {
-           if (!preg_match($needle, $file)) {
-               continue;
-           }
+        foreach ($files as $file) {
+            if (!preg_match($needle, $file)) {
+                continue;
+            }
 
-           $processBuilder = new ProcessBuilder(array('php', '-l', $file));
-           $process = $processBuilder->getProcess();
-           $process->run();
+            $processBuilder = new ProcessBuilder(array('php', '-l', $file));
+            $process = $processBuilder->getProcess();
+            $process->run();
 
-           if (! $process->isSuccessful()) {
+            if (! $process->isSuccessful()) {
 
-               $message = "`$file` failed the PHPLint test.\n";
-               $message .= sprintf('<error>%s</error>', trim($process->getErrorOutput()));
+                $message = "`$file` failed the PHPLint test.\n";
+                $message .= sprintf('<error>%s</error>', trim($process->getErrorOutput()));
 
-               return $callback(false, $message);
-           }
-       }
+                return $callback(false, $message);
+            }
+        }
 
-       return $callback(true);
+        return $callback(true);
     }
 
     private function checkPhPmd($files, \Closure $callback){
-       $needle = self::PHP_FILES_IN_SRC;
+        $needle = self::PHP_FILES_IN_SRC;
 
-       foreach ($files as $file) {
-           if (!preg_match($needle, $file)) {
-               continue;
-           }
+        foreach ($files as $file) {
+            if (!preg_match($needle, $file)) {
+                continue;
+            }
 
-           echo "$file analysis in progress ... \n";
+            echo "$file analysis in progress ... \n";
 
-           $processBuilder = new ProcessBuilder(['php', 'vendor/bin/phpmd', $file, 'text', 'controversial']);
-           $processBuilder->setWorkingDirectory($this->projectPath);
-           $process = $processBuilder->getProcess();
-           $process->run();
+            $processBuilder = new ProcessBuilder(['php', 'vendor/bin/phpmd', $file, 'text', 'controversial']);
+            $processBuilder->setWorkingDirectory($this->projectPath);
+            $process = $processBuilder->getProcess();
+            $process->run();
 
-           if (! $process->isSuccessful()) {
-               $message = "`$file` failed the PHPMd test.\n";
-               $message .= sprintf('<error>%s</error>', trim($process->getErrorOutput()));
-               $message .= sprintf('<info>%s</info>', trim($process->getOutput()));
+            if (! $process->isSuccessful()) {
+                $message = "`$file` failed the PHPMd test.\n";
+                $message .= sprintf('<error>%s</error>', trim($process->getErrorOutput()));
+                $message .= sprintf('<info>%s</info>', trim($process->getOutput()));
 
-               return $callback(false, $message);
-           }
-       }
+                return $callback(false, $message);
+            }
+        }
 
-       return $callback(true);
+        return $callback(true);
     }
 
     private function checkTests(\Closure $callback){
 
-       $processBuilder = new ProcessBuilder(array('phpunit'));
-       $processBuilder->setWorkingDirectory($this->projectPath);
-       $processBuilder->setTimeout(3600);
-       $phpunit = $processBuilder->getProcess();
+        $processBuilder = new ProcessBuilder(array('phpunit', '--stop-on-failure','--coverage-html', 'coverage'));
+        $processBuilder->setWorkingDirectory($this->projectPath);
+        $processBuilder->setTimeout(3600);
+        $phpunit = $processBuilder->getProcess();
 
-       $phpunit->run(function ($type, $buffer) {
-           $this->output->write($buffer);
-       });
+        $phpunit->run(function ($type, $buffer) {
+            $this->output->write($buffer);
+        });
 
-       return $callback($phpunit->isSuccessful());
+        return $callback($phpunit->isSuccessful());
     }
+
 
 }
