@@ -1,0 +1,28 @@
+{
+    "name": "relief_applications/commands-bundle",
+    "type": "symfony-bundle",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "alain",
+            "email": "developer2.reliefapps@gmail.com"
+        }
+    ],
+    "minimum-stability": "dev",
+    "keywords": [
+        "ReliefApps RA CommandsBundle"
+    ],
+    "require" : {
+        "php" : ">=7.0",
+        "symfony/framework-bundle" : ">=2.5.6",
+        "symfony/console": "^3.3",
+        "symfony/process": "^3.3",
+        "symfony/lock": "3.4.x-dev",
+        "phpmd/phpmd": "@stable"
+    },
+    "autoload" : {
+        "psr-4" : {
+            "RA\\CommandsBundle\\" : ""
+        }
+    }
+}
